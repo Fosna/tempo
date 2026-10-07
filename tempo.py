@@ -239,6 +239,41 @@ def cmd_report(args):
     )
 
 
+def cmd_reconcile(args):
+    now = tasks.now_local()
+    if args.task is None:
+        if args.session or args.end or args.accept or args.discard:
+            raise tasks.TempoError("name a task and a session to reconcile one")
+        pending = tasks.unresolved_sessions(store.read())
+        if not pending:
+            print("(nothing to reconcile)")
+            return
+        for task, s in pending:
+            print(
+                "%s %s  %-8s  %r  %s -> %s  (last confirmed %s)"
+                % (task["id"], s["id"], s["endState"], task["name"], s["start"], s["end"],
+                   s["lastConfirmedAt"])
+            )
+        return
+    if not args.session:
+        raise tasks.TempoError("name the session too, e.g. reconcile %s s1 --accept" % args.task)
+    with store.transaction() as state:
+        task = tasks.find_task(state, args.task)
+        session = next((s for s in task["sessions"] if s["id"] == args.session), None)
+        if session is None:
+            raise tasks.TempoError("task %s has no session %s" % (task["id"], args.session))
+        end = tasks.parse_end_near(args.end, session, now) if args.end else None
+        stale_ids = list(session["nudgeIds"]) if args.discard else []
+        task, action = tasks.reconcile_session(
+            state, args.task, args.session, now, end=end, accept=args.accept, discard=args.discard
+        )
+        name = _label(task)
+    print("%s session %s on %s" % (action, args.session, name))
+    if stale_ids:
+        _sync_nudges([((task["id"], args.session), stale_ids)])
+    print("regenerate the report to see it: tempo report daily")
+
+
 def cmd_list(args):
     now = tasks.now_local()
     state = store.read()
@@ -295,6 +330,14 @@ def build_parser():
     s.add_argument("id", nargs="?")
     s.add_argument("--reason", help="why it ran over the estimate")
     s.set_defaults(func=cmd_done)
+
+    s = sub.add_parser("reconcile", help="list unknown/inferred sessions, or resolve one")
+    s.add_argument("task", nargs="?")
+    s.add_argument("session", nargs="?")
+    s.add_argument("--end", help="the real end: 14:30 (on the session's day) or an ISO timestamp")
+    s.add_argument("--accept", action="store_true", help="keep the recorded end and confirm it")
+    s.add_argument("--discard", action="store_true", help="drop the session; its time no longer counts")
+    s.set_defaults(func=cmd_reconcile)
 
     s = sub.add_parser("report", help="write a report as JSON under ~/.tempo/reports")
     s.add_argument("kind", choices=["daily"])

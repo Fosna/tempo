@@ -6,7 +6,7 @@ touching disk. Every function that needs the time takes `now`.
 
 import re
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
 
 UNKNOWN = "unknown"
 INFERRED = "inferred"
@@ -158,6 +158,12 @@ def stop_active(state, now, at=None, task_id=None):
     return task
 
 
+def _next_session_id(task):
+    # max+1, not len+1: reconciling can discard a session and ids must stay unique
+    nums = [int(s["id"][1:]) for s in task["sessions"] if s["id"][1:].isdigit()]
+    return "s%d" % (max(nums, default=0) + 1)
+
+
 def start_task(state, task_id, now, prev_end=None):
     """Start a session. Returns (task, stopped) where stopped is the task that was
     auto-stopped to make room, or None."""
@@ -173,7 +179,7 @@ def start_task(state, task_id, now, prev_end=None):
         raise TempoError("--prev-end given but no task was active")
     task["sessions"].append(
         {
-            "id": "s%d" % (len(task["sessions"]) + 1),
+            "id": _next_session_id(task),
             "start": _iso(now),
             "end": None,
             "endState": "open",
@@ -326,3 +332,74 @@ def record_nudges(state, task_id, session_id, removed=(), added=()):
             if session["id"] == session_id:
                 kept = [i for i in session["nudgeIds"] if i not in removed]
                 session["nudgeIds"] = kept + list(added)
+
+
+def unresolved_sessions(state):
+    """(task, session) pairs whose end the user never confirmed: unknown and inferred."""
+    return [
+        (t, s)
+        for t in state["tasks"]
+        for s in t["sessions"]
+        if s["endState"] in (UNKNOWN, INFERRED)
+    ]
+
+
+def parse_end_near(text, session, now):
+    """An end time for an old session. HH:MM means on the session's own day, or the
+    next day when that would land before the start (an overnight session)."""
+    text = text.strip()
+    if text.lower() in (UNKNOWN, INFERRED):
+        raise TempoError("use --accept to keep the recorded end time")
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", text)
+    if not m:
+        return parse_when(text, now)
+    start = _ts(session["start"])
+    try:
+        end = start.replace(hour=int(m.group(1)), minute=int(m.group(2)), second=0, microsecond=0)
+    except ValueError:
+        raise TempoError("bad time: %r" % text)
+    return end + timedelta(days=1) if end < start else end
+
+
+def _check_new_end(state, session, end, now):
+    start = _ts(session["start"])
+    if end < start:
+        raise TempoError("end time is before the session started (%s)" % session["start"])
+    if end > now:
+        raise TempoError("end time is in the future")
+    for b in session["breaks"]:
+        if b["end"] and _ts(b["end"]) > end:
+            raise TempoError("end time is before a break that ended at %s" % b["end"])
+    later = [
+        _ts(other["start"])
+        for t in state["tasks"]
+        for other in t["sessions"]
+        if other is not session and _ts(other["start"]) > start
+    ]
+    if later and end > min(later):
+        raise TempoError(
+            "end time overlaps the next session, which starts at %s" % min(later).isoformat()
+        )
+
+
+def reconcile_session(state, task_id, session_id, now, end=None, accept=False, discard=False):
+    """Resolve one unknown or inferred session. Returns (task, action)."""
+    if sum([end is not None, accept, discard]) != 1:
+        raise TempoError("choose exactly one of --end, --accept, --discard")
+    task = find_task(state, task_id)
+    session = next((s for s in task["sessions"] if s["id"] == session_id), None)
+    if session is None:
+        raise TempoError("task %s has no session %s" % (task["id"], session_id))
+    if session["endState"] not in (UNKNOWN, INFERRED):
+        raise TempoError(
+            "session %s is %s; only unknown and inferred sessions are reconciled"
+            % (session_id, session["endState"])
+        )
+    if discard:
+        task["sessions"].remove(session)
+        return task, "discarded"
+    if end is not None:
+        _check_new_end(state, session, end, now)
+        session["end"] = _iso(end)
+    session["endState"] = "confirmed"
+    return task, "set" if end is not None else "accepted"

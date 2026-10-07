@@ -42,6 +42,7 @@ path.
 | "still on it", "yes" to a nudge | `tempo confirm` |
 | something slowed or annoyed them | `tempo friction "short note"` |
 | what am I on? how long so far? | `tempo list` (`--all` includes done) |
+| fix unconfirmed sessions ("reconcile") | `tempo reconcile` lists them; see Reconciling |
 | generate the day's report | `tempo report daily [--date yesterday]`; give the path and the one-line summary |
 
 Find the id with `tempo list` and match by name; do not guess an id. If no task matches,
@@ -68,6 +69,20 @@ line and run `tempo done ID --reason "..."`; the user may skip it. If the task h
 friction logged, ask once whether anything is worth noting, and accept "no". Friction
 can be added at any time, even after a task is done, with `tempo friction --task ID
 "..."`.
+
+## Reconciling
+
+`tempo reconcile` lists sessions whose end was never confirmed (`unknown`: the user did
+not remember; `inferred`: auto-closed at the last confirmed time). Go through them one at
+a time, showing the task, the day and the recorded times, and ask which applies:
+
+- the recorded end is right: `tempo reconcile ID SESSION --accept`
+- they remember the real end: `--end HH:MM` (read on the session's own day, or the next
+  day if that would precede the start; use an ISO timestamp to be exact)
+- the time should not count at all: `--discard` (confirm first, it removes the session)
+
+An end that overlaps the next session, lies in the future, or cuts into a break is
+rejected; ask again. Afterwards remind the user to regenerate the report.
 
 ## Missing data
 
