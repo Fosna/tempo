@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 import doctor
+import nudges
 import store
 import tasks
 import tempo
@@ -222,6 +223,55 @@ class TestFrictionAndDone(unittest.TestCase):
             tasks.active_task(state)
 
 
+class FakeNudge:
+    """Stands in for the nudge CLI: same commands, same output shape, in memory."""
+
+    def __init__(self, lock_path):
+        self.lock_path = lock_path
+        self.jobs = {}  # id -> (seconds, message)
+        self.calls = []
+        self.count = 0
+        self.down = False
+        self.daemon_ok = True
+        self.lock_violations = 0
+
+    def _check_lock(self):
+        """Nudge must never be called while the tasks.json lock is held."""
+        if not os.path.exists(self.lock_path):
+            return
+        fd = os.open(self.lock_path, os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            self.lock_violations += 1
+        finally:
+            os.close(fd)
+
+    def __call__(self, args, timeout=10):
+        if self.down:
+            raise nudges.NudgeError("could not run nudge: boom")
+        self._check_lock()
+        self.calls.append(args)
+        cmd = args[0]
+        if cmd == "in":
+            self.count += 1
+            job_id = "j%d" % self.count
+            self.jobs[job_id] = (int(args[1].rstrip("s")), args[2])
+            return 0, "%s  in 1m  %r\n" % (job_id, args[2]), ""
+        if cmd == "cancel":
+            if args[1] in self.jobs:
+                del self.jobs[args[1]]
+                return 0, "cancelled %s\n" % args[1], ""
+            return 1, "", "nudge: no such job: %s\n" % args[1]
+        if cmd == "list":
+            if not self.jobs:
+                return 0, "(empty)\n", ""
+            return 0, "".join("%s  in 5m  'x'\n" % j for j in self.jobs), ""
+        if cmd == "status":
+            return (0, "daemon  loaded\n", "") if self.daemon_ok else (1, "daemon  not loaded\n", "")
+        raise AssertionError(args)
+
+
 class _HomeCase(unittest.TestCase):
     def setUp(self):
         self._dir = tempfile.TemporaryDirectory()
@@ -230,6 +280,11 @@ class _HomeCase(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.addCleanup(self._dir.cleanup)
+        # never touch the real nudge queue
+        self.nudge = FakeNudge(self.path("tasks.lock"))
+        patcher = mock.patch.object(nudges, "_run", self.nudge)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def path(self, name):
         return os.path.join(self.home, name)
@@ -448,6 +503,101 @@ class TestDoctor(unittest.TestCase):
         self.assertEqual(found[-1]["severity"], doctor.WARN)
 
 
+class TestNudgeMarks(unittest.TestCase):
+    def test_short_tasks_get_none(self):
+        self.assertEqual(tasks.nudge_marks(20, 0), [])
+        self.assertEqual(tasks.nudge_marks(29, 10), [])
+
+    def test_thirty_minute_task_has_a_midpoint(self):
+        self.assertEqual(tasks.nudge_marks(30, 0), [15, 30, 45, 60, 75, 90])
+
+    def test_longer_tasks_every_thirty_then_every_fifteen_after_the_estimate(self):
+        self.assertEqual(tasks.nudge_marks(90, 0), [30, 60, 90, 105, 120, 135])
+        self.assertEqual(tasks.nudge_marks(45, 0), [30, 45, 60, 75, 90, 105])
+
+    def test_marks_are_cumulative_and_strictly_ahead(self):
+        self.assertEqual(tasks.nudge_marks(90, 40)[:2], [60, 90])
+        self.assertEqual(tasks.nudge_marks(90, 30)[0], 60)  # not the mark we are on
+        self.assertEqual(tasks.nudge_marks(90, 95)[:2], [105, 120])
+
+
+class TestNudgeAdapter(unittest.TestCase):
+    def test_schedule_returns_the_job_id(self):
+        with mock.patch.object(nudges, "_run", return_value=(0, "3f1a9c  in 15m  'x'\n", "")) as run:
+            self.assertEqual(nudges.schedule(900, "x"), "3f1a9c")
+        run.assert_called_once_with(["in", "900s", "x", "--title", "tempo"])
+
+    def test_schedule_failure(self):
+        with mock.patch.object(nudges, "_run", return_value=(1, "", "nudge: bad duration\n")):
+            with self.assertRaises(nudges.NudgeError):
+                nudges.schedule(900, "x")
+
+    def test_cancel_treats_a_missing_job_as_done(self):
+        with mock.patch.object(nudges, "_run", return_value=(1, "", "nudge: no such job: x\n")):
+            nudges.cancel("x")
+        with mock.patch.object(nudges, "_run", return_value=(1, "", "disk on fire\n")):
+            with self.assertRaises(nudges.NudgeError):
+                nudges.cancel("x")
+
+    def test_pending_ids(self):
+        out = "3f1a9c  in 5m  'a b'\n77aa11  in 1h  'c'\n"
+        with mock.patch.object(nudges, "_run", return_value=(0, out, "")):
+            self.assertEqual(nudges.pending_ids(), {"3f1a9c", "77aa11"})
+        with mock.patch.object(nudges, "_run", return_value=(0, "(empty)\n", "")):
+            self.assertEqual(nudges.pending_ids(), set())
+
+    def test_missing_binary(self):
+        with mock.patch.dict(os.environ, {}, clear=False), \
+                mock.patch("nudges.shutil.which", return_value=None):
+            os.environ.pop("TEMPO_NUDGE", None)
+            with self.assertRaises(nudges.NudgeError):
+                nudges._run(["list"])
+
+
+class TestDoctorNudges(unittest.TestCase):
+    def state_with_nudges(self, status_active=True):
+        state, task = _state_with_task(90)
+        tasks.start_task(state, task["id"], at(0))
+        task["sessions"][0]["nudgeIds"] = ["j1", "j2"]
+        if not status_active:
+            tasks.stop_active(state, at(5))
+        return state
+
+    def health(self, **kw):
+        base = {"available": True, "pending": set(), "daemon_ok": True, "detail": "ok"}
+        base.update(kw)
+        return base
+
+    def codes(self, state, nudge):
+        return [f["code"] for f in doctor.check(state, at(10), nudge=nudge)]
+
+    def test_live_nudges_are_fine(self):
+        state = self.state_with_nudges()
+        self.assertEqual(self.codes(state, self.health(pending={"j1", "j2"})), [])
+
+    def test_pending_nudge_on_a_stopped_session_is_an_orphan(self):
+        state = self.state_with_nudges(status_active=False)
+        found = doctor.check(state, at(10), nudge=self.health(pending={"j1"}))
+        self.assertEqual([f["code"] for f in found], ["orphaned_nudge"])
+        self.assertEqual(found[0]["fixes"], ["nudge cancel j1"])
+
+    def test_recorded_but_already_gone_is_not_an_orphan(self):
+        state = self.state_with_nudges(status_active=False)
+        self.assertEqual(self.codes(state, self.health(pending=set())), [])
+
+    def test_daemon_down(self):
+        state = self.state_with_nudges()
+        found = self.codes(state, self.health(pending={"j1", "j2"}, daemon_ok=False))
+        self.assertEqual(found, ["nudge_daemon"])
+
+    def test_nudge_unavailable(self):
+        found = doctor.check(store.new_state(), at(0), nudge={"available": False, "error": "nudge not found"})
+        self.assertEqual([f["code"] for f in found], ["nudge_unavailable"])
+
+    def test_skipped_without_health(self):
+        self.assertEqual(doctor.check(self.state_with_nudges(False), at(10)), [])
+
+
 class TestLock(_HomeCase):
     def _hold(self, pid_text):
         """Take the lock on a separate file description, as another process would."""
@@ -550,6 +700,127 @@ class TestCli(_HomeCase):
         with store.transaction() as state:
             state["tasks"][0]["status"] = "active"
         self.assertIn("reset", self.run_cli("stop", "--task", self.first_id()))
+
+    def session_ids(self, index=0):
+        return store.read()["tasks"][index]["sessions"][-1]["nudgeIds"]
+
+    def test_start_schedules_the_next_marks(self):
+        self.run_cli("add", "write", "doc", "-e", "90")
+        out = self.run_cli("start", self.first_id())
+        self.assertIn("nudges: 6 scheduled, next in 30m", out)
+        delays = [sec for sec, _ in self.nudge.jobs.values()]
+        self.assertEqual(delays, [1800, 3600, 5400, 6300, 7200, 8100])
+        self.assertEqual(sorted(self.session_ids()), sorted(self.nudge.jobs))
+        message = next(iter(self.nudge.jobs.values()))[1]
+        self.assertIn("write doc", message)
+        self.assertIn("tempo confirm", message)
+
+    def test_short_tasks_schedule_nothing(self):
+        self.run_cli("add", "quick", "-e", "20")
+        self.run_cli("start", self.first_id())
+        self.assertEqual(self.nudge.jobs, {})
+        self.assertEqual(self.nudge.calls, [])
+
+    def test_thirty_minute_task_gets_its_midpoint(self):
+        self.run_cli("add", "half", "-e", "30")
+        self.run_cli("start", self.first_id())
+        self.assertEqual(min(sec for sec, _ in self.nudge.jobs.values()), 900)
+
+    def test_stop_cancels_and_clears(self):
+        self.run_cli("add", "one", "-e", "90")
+        self.run_cli("start", self.first_id())
+        self.run_cli("stop")
+        self.assertEqual(self.nudge.jobs, {})
+        self.assertEqual(self.session_ids(), [])
+
+    def test_break_cancels_and_resume_reschedules(self):
+        self.run_cli("add", "one", "-e", "90")
+        self.run_cli("start", self.first_id())
+        self.run_cli("break")
+        self.assertEqual(self.nudge.jobs, {})
+        out = self.run_cli("resume")
+        self.assertIn("6 scheduled", out)
+        self.assertEqual(len(self.session_ids()), 6)
+
+    def test_confirm_replaces_the_schedule(self):
+        self.run_cli("add", "one", "-e", "90")
+        self.run_cli("start", self.first_id())
+        before = set(self.session_ids())
+        self.run_cli("confirm")
+        after = set(self.session_ids())
+        self.assertEqual(len(after), 6)
+        self.assertFalse(before & after)
+        self.assertEqual(set(self.nudge.jobs), after)  # the old ones are really gone
+
+    def test_confirm_replans_from_cumulative_actual_time(self):
+        self.run_cli("add", "one", "-e", "90")
+        self.run_cli("start", self.first_id())
+        with store.transaction() as state:  # pretend 40 minutes have been worked
+            session = state["tasks"][0]["sessions"][0]
+            session["start"] = (tasks.now_local() - timedelta(minutes=40)).isoformat()
+        self.run_cli("confirm")
+        first = min(sec for sec, _ in self.nudge.jobs.values())
+        self.assertAlmostEqual(first, 20 * 60, delta=5)  # the 60-minute mark
+
+    def test_switching_tasks_moves_the_nudges(self):
+        self.run_cli("add", "a", "-e", "90")
+        self.run_cli("add", "b", "-e", "60")
+        a, b = [t["id"] for t in store.read()["tasks"]]
+        self.run_cli("start", a)
+        self.run_cli("start", b)
+        state = store.read()
+        self.assertEqual(state["tasks"][0]["sessions"][-1]["nudgeIds"], [])
+        self.assertEqual(len(state["tasks"][1]["sessions"][-1]["nudgeIds"]), 6)
+        self.assertEqual(len(self.nudge.jobs), 6)
+
+    def test_done_cancels(self):
+        self.run_cli("add", "one", "-e", "90")
+        self.run_cli("start", self.first_id())
+        self.run_cli("done")
+        self.assertEqual(self.nudge.jobs, {})
+
+    def test_nudge_is_never_called_while_the_lock_is_held(self):
+        self.run_cli("add", "a", "-e", "90")
+        self.run_cli("add", "b", "-e", "90")
+        a, b = [t["id"] for t in store.read()["tasks"]]
+        for argv in (["start", a], ["break"], ["resume"], ["confirm"], ["start", b],
+                     ["stop"], ["start", a], ["done"], ["doctor"]):
+            try:
+                self.run_cli(*argv)
+            except SystemExit:
+                pass
+        self.assertGreater(len(self.nudge.calls), 10)
+        self.assertEqual(self.nudge.lock_violations, 0)
+
+    def test_nudge_down_never_blocks_tracking(self):
+        self.nudge.down = True
+        self.run_cli("add", "one", "-e", "90")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.run_cli("start", self.first_id())
+        self.assertIn("nudge", err.getvalue())
+        self.assertEqual(store.read()["tasks"][0]["status"], "active")
+        self.assertEqual(self.session_ids(), [])
+
+    def test_failed_cancel_leaves_the_ids_for_doctor(self):
+        self.run_cli("add", "one", "-e", "90")
+        self.run_cli("start", self.first_id())
+        ids = list(self.session_ids())
+        self.nudge.down = True
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.run_cli("stop")
+        self.assertEqual(self.session_ids(), ids)  # still recorded
+        self.nudge.down = False
+        code, out = self.run_status("doctor")
+        self.assertEqual(code, 1)
+        self.assertIn("orphaned_nudge", out)
+        self.assertIn("fix: nudge cancel %s" % ids[0], out)
+
+    def test_doctor_reports_a_dead_daemon(self):
+        self.nudge.daemon_ok = False
+        code, out = self.run_status("doctor")
+        self.assertEqual(code, 1)
+        self.assertIn("nudge_daemon", out)
 
     def test_happy_path(self):
         self.assertIn("est 1h30m", self.run_cli("add", "write", "doc", "-e", "1h30m"))

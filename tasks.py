@@ -284,3 +284,45 @@ def stale_after_min(task, now):
         return BREAK_GRACE_MIN
     interval = nudge_interval_min(task["estimateMin"], actual_seconds(task, now) / 60)
     return 2 * interval if interval else NO_NUDGE_GRACE_MIN
+
+
+MAX_AHEAD = 6  # nudges are one-shot, so schedule this many ahead and top up on confirm
+
+
+def _nudge_marks(estimate_min):
+    """Cumulative-actual minutes at which a nudge is due (F4), ascending."""
+    if estimate_min == 30:
+        yield 15
+    elif estimate_min > 30:
+        m = 30
+        while m < estimate_min:
+            yield m
+            m += 30
+    m = estimate_min
+    while True:
+        yield m
+        m += 15
+
+
+def nudge_marks(estimate_min, actual_min, count=MAX_AHEAD):
+    """The next `count` nudge marks strictly after `actual_min`. Tasks under 30m get none."""
+    if estimate_min < 30:
+        return []
+    out = []
+    for m in _nudge_marks(estimate_min):
+        if m > actual_min:
+            out.append(m)
+            if len(out) == count:
+                break
+    return out
+
+
+def record_nudges(state, task_id, session_id, removed=(), added=()):
+    """Update the nudge ids kept on a session. Quietly does nothing if it has gone."""
+    for task in state["tasks"]:
+        if task["id"] != task_id:
+            continue
+        for session in task["sessions"]:
+            if session["id"] == session_id:
+                kept = [i for i in session["nudgeIds"] if i not in removed]
+                session["nudgeIds"] = kept + list(added)

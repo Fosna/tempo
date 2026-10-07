@@ -3,8 +3,8 @@
 Read-only: `check` looks at the state and returns findings, each with the exact
 command that fixes it. Nothing here changes data; the user confirms every fix.
 
-Not checked yet (they need the nudge adapter from step 3): orphaned nudges and a
-nudge daemon that is not running.
+Nudge checks run only when the caller passes `nudge`, a dict describing nudge's health
+(see tempo._nudge_health). That keeps this module free of subprocess calls.
 """
 
 from datetime import datetime
@@ -53,7 +53,46 @@ def _check_times(task):
     return problems
 
 
-def check(state, now, aside=()):
+def _check_nudge(state, nudge):
+    if not nudge["available"]:
+        return [
+            _finding(
+                WARN,
+                "nudge_unavailable",
+                "%s; no nudges will fire, so zombie sessions are likely" % nudge["error"],
+                ["install nudge (python3 install.py install in its repo) or set TEMPO_NUDGE"],
+            )
+        ]
+    found = []
+    if not nudge["daemon_ok"]:
+        found.append(
+            _finding(
+                WARN,
+                "nudge_daemon",
+                "nudge will not fire notifications: %s" % nudge["detail"],
+                ["nudge status   (shows how to repair it)"],
+            )
+        )
+    for t in state["tasks"]:
+        for i, s in enumerate(t["sessions"]):
+            live = t["status"] == "active" and i == len(t["sessions"]) - 1 and s["end"] is None
+            if live:
+                continue
+            for job_id in s.get("nudgeIds", []):
+                if job_id in nudge["pending"]:
+                    found.append(
+                        _finding(
+                            WARN,
+                            "orphaned_nudge",
+                            "nudge %s is still pending for task %s session %s, which is not running"
+                            % (job_id, t["id"], s["id"]),
+                            ["nudge cancel %s" % job_id],
+                        )
+                    )
+    return found
+
+
+def check(state, now, aside=(), nudge=None):
     findings = []
     all_tasks = state["tasks"]
 
@@ -135,6 +174,9 @@ def check(state, now, aside=()):
                 ["inspect it, merge what you need by hand, then delete or move it"],
             )
         )
+
+    if nudge is not None:
+        findings.extend(_check_nudge(state, nudge))
 
     findings.sort(key=lambda f: f["severity"] != ERROR)
     return findings

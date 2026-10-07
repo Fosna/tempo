@@ -11,9 +11,11 @@
 """
 
 import argparse
+import math
 import sys
 
 import doctor
+import nudges
 import store
 import tasks
 from timespec import BadDuration, format_minutes, parse_minutes
@@ -31,6 +33,65 @@ def _label(task):
     return "%s  %r" % (task["id"], task["name"])
 
 
+def _session_ref(task):
+    return (task["id"], task["sessions"][-1]["id"]) if task["sessions"] else None
+
+
+def _cancel_spec(task):
+    """(ref, ids) for the nudges still recorded on the task's latest session."""
+    ref = _session_ref(task)
+    ids = list(task["sessions"][-1]["nudgeIds"]) if ref else []
+    return (ref, ids) if ids else None
+
+
+def _schedule_spec(task, now):
+    """(ref, [(seconds, message)]) planned from the task's cumulative actual time."""
+    ref = _session_ref(task)
+    actual = tasks.actual_seconds(task, now) / 60
+    items = [
+        (
+            max(1, math.ceil((mark - actual) * 60)),
+            "Still on %r? %s of %s. Reply in Claude: tempo confirm"
+            % (task["name"], format_minutes(mark), format_minutes(task["estimateMin"])),
+        )
+        for mark in tasks.nudge_marks(task["estimateMin"], actual)
+    ]
+    return (ref, items) if items else None
+
+
+def _sync_nudges(cancels=(), schedule=None):
+    """Cancel old nudges, schedule new ones, record the ids. Runs outside the lock.
+
+    A nudge problem becomes a warning, never a failure: tracking comes first. Ids that
+    could not be cancelled stay on the session, where `tempo doctor` finds them.
+    """
+    removed = {}
+    added = []
+    warning = None
+    try:
+        for ref, ids in filter(None, cancels):
+            for job_id in ids:
+                nudges.cancel(job_id)
+                removed.setdefault(ref, []).append(job_id)
+        if schedule:
+            ref, items = schedule
+            for seconds, message in items:
+                added.append(nudges.schedule(seconds, message))
+    except nudges.NudgeError as e:
+        warning = str(e)
+
+    if removed or added:
+        with store.transaction() as state:
+            for ref, ids in removed.items():
+                tasks.record_nudges(state, ref[0], ref[1], removed=ids)
+            if added:
+                tasks.record_nudges(state, schedule[0][0], schedule[0][1], added=added)
+    if warning:
+        print("tempo: nudge: %s" % warning, file=sys.stderr)
+    if added:
+        print("nudges: %d scheduled, next in %s" % (len(added), _mins(schedule[1][0][0])))
+
+
 def cmd_add(args):
     estimate = parse_minutes(args.estimate)
     now = tasks.now_local()
@@ -43,6 +104,8 @@ def cmd_start(args):
     now = tasks.now_local()
     with store.transaction() as state:
         task, stopped = tasks.start_task(state, args.id, now, _when(args.prev_end, now))
+        cancels = [_cancel_spec(stopped)] if stopped else []
+        schedule = _schedule_spec(task, now)
     if stopped:
         session = stopped["sessions"][-1]
         print(
@@ -50,34 +113,51 @@ def cmd_start(args):
             % (_label(stopped), session["end"], session["endState"])
         )
     print("started %s  est %s" % (_label(task), format_minutes(task["estimateMin"])))
+    _sync_nudges(cancels, schedule)
 
 
 def cmd_stop(args):
     now = tasks.now_local()
     with store.transaction() as state:
         task = tasks.stop_active(state, now, _when(args.at, now), args.task)
+        cancels = [_cancel_spec(task)]
         session = task["sessions"][-1] if task["sessions"] else None
         if session is None or session["end"] is None:
-            print("reset %s to todo" % _label(task))
-            return
-        this = tasks.session_seconds(session, now)
-        total = tasks.actual_seconds(task, now)
-    print(
-        "stopped %s (%s): session %s, total %s of %s"
-        % (_label(task), session["endState"], _mins(this), _mins(total),
-           format_minutes(task["estimateMin"]))
-    )
+            line = "reset %s to todo" % _label(task)
+        else:
+            line = "stopped %s (%s): session %s, total %s of %s" % (
+                _label(task), session["endState"],
+                _mins(tasks.session_seconds(session, now)),
+                _mins(tasks.actual_seconds(task, now)),
+                format_minutes(task["estimateMin"]),
+            )
+    print(line)
+    _sync_nudges(cancels)
 
 
 def cmd_confirm(args):
     now = tasks.now_local()
     with store.transaction() as state:
         task = tasks.confirm(state, now)
+        cancels = [_cancel_spec(task)]
+        schedule = _schedule_spec(task, now)
     print("confirmed %s at %s" % (_label(task), now.strftime("%H:%M")))
+    _sync_nudges(cancels, schedule)
+
+
+def _nudge_health():
+    try:
+        pending = nudges.pending_ids()
+        daemon_ok, detail = nudges.daemon_status()
+    except nudges.NudgeError as e:
+        return {"available": False, "error": str(e)}
+    return {"available": True, "pending": pending, "daemon_ok": daemon_ok, "detail": detail}
 
 
 def cmd_doctor(args):
-    findings = doctor.check(store.read(), tasks.now_local(), store.aside_files())
+    findings = doctor.check(
+        store.read(), tasks.now_local(), store.aside_files(), _nudge_health()
+    )
     if not findings:
         print("ok")
         return
@@ -92,14 +172,19 @@ def cmd_break(args):
     now = tasks.now_local()
     with store.transaction() as state:
         task = tasks.start_break(state, now)
+        cancels = [_cancel_spec(task)]
     print("break started on %s" % _label(task))
+    _sync_nudges(cancels)
 
 
 def cmd_resume(args):
     now = tasks.now_local()
     with store.transaction() as state:
         task = tasks.end_break(state, now)
+        cancels = [_cancel_spec(task)]
+        schedule = _schedule_spec(task, now)
     print("back on %s" % _label(task))
+    _sync_nudges(cancels, schedule)
 
 
 def cmd_friction(args):
@@ -113,6 +198,7 @@ def cmd_done(args):
     now = tasks.now_local()
     with store.transaction() as state:
         task = tasks.complete_task(state, args.id, now, args.reason)
+        cancels = [_cancel_spec(task)]
         actual = tasks.actual_seconds(task, now)
     est = task["estimateMin"]
     line = "done %s: actual %s vs est %s" % (_label(task), _mins(actual), format_minutes(est))
@@ -121,6 +207,7 @@ def cmd_done(args):
         if not task["overrunReason"]:
             line += "; add a reason: tempo done %s --reason '...'" % task["id"]
     print(line)
+    _sync_nudges(cancels)
 
 
 def cmd_list(args):
