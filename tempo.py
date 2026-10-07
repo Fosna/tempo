@@ -11,11 +11,14 @@
 """
 
 import argparse
+import json
 import math
 import sys
+from datetime import datetime, timedelta
 
 import doctor
 import nudges
+import report
 import store
 import tasks
 from timespec import BadDuration, format_minutes, parse_minutes
@@ -210,6 +213,32 @@ def cmd_done(args):
     _sync_nudges(cancels)
 
 
+def _report_day(text, now):
+    if text in (None, "today"):
+        return now.date()
+    if text == "yesterday":
+        return now.date() - timedelta(days=1)
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        raise tasks.TempoError("bad date: %r (try 2026-10-07, today or yesterday)" % text)
+
+
+def cmd_report(args):
+    now = tasks.now_local()
+    built = report.build_daily(store.read(), _report_day(args.date, now), now)
+    if args.stdout:
+        print(json.dumps(built, indent=2))
+        return
+    path = report.write(built, store.reports_dir())
+    totals = built["totals"]
+    print(
+        "%s: %d tasks, %s worked, %d completed, %d unresolved"
+        % (path, len(built["tasks"]), format_minutes(totals["workedMin"]),
+           totals["completed"]["count"], len(built["unresolved"]))
+    )
+
+
 def cmd_list(args):
     now = tasks.now_local()
     state = store.read()
@@ -266,6 +295,12 @@ def build_parser():
     s.add_argument("id", nargs="?")
     s.add_argument("--reason", help="why it ran over the estimate")
     s.set_defaults(func=cmd_done)
+
+    s = sub.add_parser("report", help="write a report as JSON under ~/.tempo/reports")
+    s.add_argument("kind", choices=["daily"])
+    s.add_argument("--date", help="2026-10-07, today (default) or yesterday")
+    s.add_argument("--stdout", action="store_true", help="print the JSON instead of writing a file")
+    s.set_defaults(func=cmd_report)
 
     s = sub.add_parser("list", help="show tasks")
     s.add_argument("--all", action="store_true", help="include done tasks")

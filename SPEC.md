@@ -176,3 +176,10 @@ None blocking. Build order is in `BUILD_ORDER.md`.
 - Nudge basis: task estimate plus cumulative actual time.
 - Analytics output goes to `~/.tempo/analysis/`.
 - `inferred` sessions count as unresolved in reports.
+
+## Known items
+
+Accepted as is; revisit if they become a problem.
+
+- **Unresolved list is not windowed.** Reports list every unresolved session across all history (`inWindow` marks the ones inside the report's window). If sessions pile up unreconciled, reports get noisy and the list may need a cap or an age cutoff.
+- **`deltaMin` is misleading for unfinished tasks.** It is total actual minus estimate for every task row, but a task still in progress has only partial actual time, so its delta reads as an underrun. Only `done` tasks (and `totals.completed`) give a real comparison. Deliberately left unfixed so the problem can be spotted in real use first; the likely fix is `null` unless the task is done.

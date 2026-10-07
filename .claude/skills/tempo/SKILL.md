@@ -1,6 +1,6 @@
 ---
 name: tempo
-description: Track tasks, estimates and actual time. Use when the user plans or adds a task, starts, stops, finishes or switches tasks, takes or ends a break, says they are still on a task (including replies to a tempo nudge such as "Still on 'x'?"), logs a friction point, or asks what they are working on or how long something has taken. Not for reports or analytics.
+description: Track tasks, estimates and actual time. Use when the user plans or adds a task, starts, stops, finishes or switches tasks, takes or ends a break, says they are still on a task (including replies to a tempo nudge such as "Still on 'x'?"), logs a friction point, asks what they are working on or how long something has taken, or wants the day's report generated. Not for reviewing or interpreting reports.
 ---
 
 # tempo
@@ -42,6 +42,7 @@ path.
 | "still on it", "yes" to a nudge | `tempo confirm` |
 | something slowed or annoyed them | `tempo friction "short note"` |
 | what am I on? how long so far? | `tempo list` (`--all` includes done) |
+| generate the day's report | `tempo report daily [--date yesterday]`; give the path and the one-line summary |
 
 Find the id with `tempo list` and match by name; do not guess an id. If no task matches,
 offer to add one.

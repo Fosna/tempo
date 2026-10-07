@@ -142,6 +142,10 @@ def _write(state):
         raise
 
 
+def reports_dir():
+    return _path("reports")
+
+
 def aside_files():
     """Names of tasks.json files that were set aside as unreadable."""
     try:
