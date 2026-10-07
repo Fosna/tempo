@@ -111,4 +111,4 @@ data or reminders.
 
 ## License
 
-None yet. Until one is added, the default is all rights reserved.
+[MIT](LICENSE).
