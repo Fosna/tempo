@@ -8,7 +8,7 @@ Follow nudge's layout: flat Python modules, tests alongside, an `install.py` tha
 4. **Tempo skill.** Chat interface over the CLI: runs doctor first, announces auto-closed tasks, asks for missing data.
 5. **Report.** `tempo report daily` writing JSON to `~/.tempo/reports/`, including the unresolved list.
 6. **Reconcile.** `tempo reconcile` to resolve `unknown` and `inferred` sessions.
-7. **Analytics skill.** Reads report JSON, drives reconciliation, writes data, graphs, narrative, wins, misses, learnings and decision to `~/.tempo/analysis/`.
+7. **Analytics skill.** *(Parked: dogfooding first, so real tracking data shapes the report and the analysis. Steps 1-6 and 8 are done.)* Reads report JSON, drives reconciliation, writes data, graphs, narrative, wins, misses, learnings and decision to `~/.tempo/analysis/`.
 8. **Install.** `install.py` copies the CLI and both skills into place.
 
 **Later:** recurring report generation, weekly report, nudge reply buttons.
