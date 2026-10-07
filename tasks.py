@@ -9,6 +9,11 @@ import secrets
 from datetime import datetime
 
 UNKNOWN = "unknown"
+INFERRED = "inferred"
+
+# When a session counts as a zombie (F5). Tunable; the nudge cadence (F4) drives it.
+NO_NUDGE_GRACE_MIN = 60  # tasks under 30m get no nudges, so allow this long unconfirmed
+BREAK_GRACE_MIN = 90  # a break may legitimately be long (lunch)
 
 
 class TempoError(Exception):
@@ -28,17 +33,17 @@ def _iso(dt):
 
 
 def parse_when(text, now):
-    """`unknown`, `HH:MM` (today), or an ISO timestamp (naive means local)."""
+    """`unknown`, `inferred`, `HH:MM` (today), or an ISO timestamp (naive means local)."""
     text = text.strip()
-    if text.lower() == UNKNOWN:
-        return UNKNOWN
+    if text.lower() in (UNKNOWN, INFERRED):
+        return text.lower()
     m = re.fullmatch(r"(\d{1,2}):(\d{2})", text)
     try:
         if m:
             return now.replace(hour=int(m.group(1)), minute=int(m.group(2)), second=0)
         dt = datetime.fromisoformat(text)
     except ValueError:
-        raise TempoError("bad time: %r (try 14:30, an ISO timestamp, or 'unknown')" % text)
+        raise TempoError("bad time: %r (try 14:30, an ISO timestamp, 'inferred' or 'unknown')" % text)
     return dt if dt.tzinfo else dt.replace(tzinfo=now.tzinfo)
 
 
@@ -72,6 +77,12 @@ def _open_session(task):
     raise TempoError("task %s has no open session" % task["id"])
 
 
+def _touch(task, now):
+    """Record that the user was demonstrably on the task at `now`."""
+    if task["sessions"] and task["sessions"][-1]["end"] is None:
+        task["sessions"][-1]["lastConfirmedAt"] = _iso(now)
+
+
 def add_task(state, name, estimate_min, notes, now):
     name = name.strip()
     if not name:
@@ -99,9 +110,10 @@ def add_task(state, name, estimate_min, notes, now):
 def _resolve_end(session, at, now):
     if at is None:
         end, end_state = now, "confirmed"
-    elif at == UNKNOWN:
-        # placeholder: the last moment we know the user was on the task
-        end, end_state = _ts(session["lastConfirmedAt"]), UNKNOWN
+    elif at in (UNKNOWN, INFERRED):
+        # placeholder: the last moment we know the user was on the task. `inferred`
+        # means the user accepted that time; `unknown` sends it to reconciliation.
+        end, end_state = _ts(session["lastConfirmedAt"]), at
     else:
         end, end_state = at, "confirmed"
         if end < _ts(session["start"]):
@@ -121,13 +133,25 @@ def _close_session(task, session, end, end_state):
         session["breaks"][-1]["end"] = _iso(end)
     session["end"] = _iso(end)
     session["endState"] = end_state
-    task["status"] = "todo"
+    if task["status"] == "active":
+        task["status"] = "todo"
 
 
-def stop_active(state, now, at=None):
-    task = active_task(state)
-    if task is None:
-        raise TempoError("nothing is active")
+def stop_active(state, now, at=None, task_id=None):
+    """Stop the active task's session, or the named task's (which also repairs a task
+    whose status and open session disagree)."""
+    if task_id:
+        task = find_task(state, task_id)
+        has_session = bool(task["sessions"]) and task["sessions"][-1]["end"] is None
+        if not has_session and task["status"] != "active":
+            raise TempoError("task %s has nothing to stop" % task["id"])
+        if not has_session:
+            task["status"] = "todo"  # active without a session: just repair the status
+            return task
+    else:
+        task = active_task(state)
+        if task is None:
+            raise TempoError("nothing is active")
     session = _open_session(task)
     end, end_state = _resolve_end(session, at, now)
     _close_session(task, session, end, end_state)
@@ -170,6 +194,7 @@ def start_break(state, now):
     if session["breaks"] and session["breaks"][-1]["end"] is None:
         raise TempoError("already on a break")
     session["breaks"].append({"start": _iso(now), "end": None})
+    _touch(task, now)
     return task
 
 
@@ -181,6 +206,7 @@ def end_break(state, now):
     if not session["breaks"] or session["breaks"][-1]["end"] is not None:
         raise TempoError("not on a break")
     session["breaks"][-1]["end"] = _iso(now)
+    _touch(task, now)
     return task
 
 
@@ -192,6 +218,16 @@ def add_friction(state, text, now, task_id=None):
     if task is None:
         raise TempoError("no active task; pass --task ID")
     task["friction"].append({"at": _iso(now), "text": text})
+    return task
+
+
+def confirm(state, now):
+    """The user says they are still on the active task."""
+    task = active_task(state)
+    if task is None:
+        raise TempoError("nothing is active")
+    _open_session(task)
+    _touch(task, now)
     return task
 
 
@@ -227,3 +263,24 @@ def session_seconds(session, now):
 
 def actual_seconds(task, now):
     return sum(session_seconds(s, now) for s in task["sessions"])
+
+
+def nudge_interval_min(estimate_min, actual_min):
+    """Minutes between "still on it?" nudges (F4), or None when the task gets none.
+
+    A 30m estimate's single midpoint nudge at 15m is a scheduling detail of step 3.
+    """
+    if estimate_min < 30:
+        return None
+    if actual_min >= estimate_min:
+        return 15
+    return 30
+
+
+def stale_after_min(task, now):
+    """How long an open session may go unconfirmed before it counts as a zombie."""
+    session = task["sessions"][-1]
+    if session["breaks"] and session["breaks"][-1]["end"] is None:
+        return BREAK_GRACE_MIN
+    interval = nudge_interval_min(task["estimateMin"], actual_seconds(task, now) / 60)
+    return 2 * interval if interval else NO_NUDGE_GRACE_MIN

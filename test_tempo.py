@@ -11,6 +11,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 
+import doctor
 import store
 import tasks
 import tempo
@@ -182,6 +183,14 @@ class TestFrictionAndDone(unittest.TestCase):
         tasks.add_friction(state, "slow build", at(3))
         self.assertEqual([f["text"] for f in task["friction"]], ["after the fact", "slow build"])
 
+    def test_friction_after_the_task_is_done(self):
+        state, task = _state_with_task()
+        tasks.start_task(state, task["id"], at(0))
+        tasks.complete_task(state, None, at(30))
+        tasks.add_friction(state, "review took a day", at(600), task["id"])
+        self.assertEqual(task["friction"][0]["text"], "review took a day")
+        self.assertEqual(task["status"], "done")
+
     def test_done_stops_the_session(self):
         state, task = _state_with_task()
         tasks.start_task(state, task["id"], at(0))
@@ -280,6 +289,165 @@ class TestStore(_HomeCase):
         self.assertFalse([n for n in os.listdir(self.home) if ".corrupt-" in n])
 
 
+class TestRecoveryPrimitives(unittest.TestCase):
+    def test_inferred_closes_at_last_confirmed(self):
+        state, task = _state_with_task()
+        tasks.start_task(state, task["id"], at(0))
+        task["sessions"][0]["lastConfirmedAt"] = at(20).isoformat()
+        tasks.stop_active(state, at(200), at=tasks.INFERRED)
+        s = task["sessions"][0]
+        self.assertEqual((s["end"], s["endState"]), (at(20).isoformat(), "inferred"))
+        self.assertEqual(task["status"], "todo")
+
+    def test_interactions_refresh_last_confirmed(self):
+        state, task = _state_with_task()
+        tasks.start_task(state, task["id"], at(0))
+        last = lambda: task["sessions"][0]["lastConfirmedAt"]
+        tasks.start_break(state, at(5))
+        self.assertEqual(last(), at(5).isoformat())
+        tasks.end_break(state, at(9))
+        self.assertEqual(last(), at(9).isoformat())
+        tasks.add_friction(state, "slow", at(12))  # friction is not presence
+        self.assertEqual(last(), at(9).isoformat())
+        tasks.confirm(state, at(30))
+        self.assertEqual(last(), at(30).isoformat())
+
+    def test_inferred_while_on_a_break_never_ends_before_the_break_started(self):
+        state, task = _state_with_task()
+        tasks.start_task(state, task["id"], at(0))
+        tasks.start_break(state, at(10))  # also confirms at 10
+        tasks.stop_active(state, at(300), at=tasks.INFERRED)
+        self.assertEqual(tasks.actual_seconds(task, at(400)), 10 * 60)
+
+    def test_stop_named_task_even_with_several_active(self):
+        state, a = _state_with_task()
+        b = tasks.add_task(state, "other", 30, "", T0)
+        for t in (a, b):
+            tasks.start_task(state, t["id"], at(0)) if t is a else None
+        # fabricate the broken state: b active too, with its own open session
+        b["status"] = "active"
+        b["sessions"].append(dict(a["sessions"][0], id="s1"))
+        with self.assertRaises(tasks.TempoError):
+            tasks.stop_active(state, at(5))  # ambiguous without --task
+        tasks.stop_active(state, at(5), at=tasks.INFERRED, task_id=b["id"])
+        self.assertEqual(b["status"], "todo")
+        self.assertEqual(a["status"], "active")
+
+    def test_stop_repairs_active_without_session(self):
+        state, task = _state_with_task()
+        task["status"] = "active"
+        tasks.stop_active(state, at(0), task_id=task["id"])
+        self.assertEqual(task["status"], "todo")
+
+    def test_stop_closing_a_done_task_session_keeps_it_done(self):
+        state, task = _state_with_task()
+        tasks.start_task(state, task["id"], at(0))
+        task["status"] = "done"  # open session on a done task
+        tasks.stop_active(state, at(5), task_id=task["id"])
+        self.assertEqual(task["status"], "done")
+
+    def test_nothing_to_stop(self):
+        state, task = _state_with_task()
+        with self.assertRaises(tasks.TempoError):
+            tasks.stop_active(state, at(0), task_id=task["id"])
+
+    def test_nudge_interval(self):
+        self.assertIsNone(tasks.nudge_interval_min(20, 5))
+        self.assertIsNone(tasks.nudge_interval_min(20, 90))
+        self.assertEqual(tasks.nudge_interval_min(30, 5), 30)
+        self.assertEqual(tasks.nudge_interval_min(90, 10), 30)
+        self.assertEqual(tasks.nudge_interval_min(90, 90), 15)
+
+
+class TestDoctor(unittest.TestCase):
+    def codes(self, state, now, aside=()):
+        return [f["code"] for f in doctor.check(state, now, aside)]
+
+    def active_state(self, estimate=90):
+        state, task = _state_with_task(estimate)
+        tasks.start_task(state, task["id"], at(0))
+        return state, task
+
+    def test_clean(self):
+        state, _ = self.active_state()
+        self.assertEqual(doctor.check(state, at(10)), [])
+        self.assertEqual(doctor.check(store.new_state(), at(10)), [])
+
+    def test_zombie_after_twice_the_nudge_interval(self):
+        state, task = self.active_state(90)  # nudged every 30m -> limit 60m
+        self.assertEqual(self.codes(state, at(59)), [])
+        self.assertEqual(self.codes(state, at(61)), ["zombie"])
+        finding = doctor.check(state, at(61))[0]
+        self.assertIn("tempo stop --task %s --at inferred" % task["id"], finding["fixes"][0])
+
+    def test_confirming_clears_the_zombie(self):
+        state, _ = self.active_state(90)
+        tasks.confirm(state, at(55))
+        self.assertEqual(self.codes(state, at(80)), [])
+
+    def test_overrun_tightens_the_limit(self):
+        state, _ = self.active_state(60)
+        tasks.confirm(state, at(50))
+        # actual (65m) is past the estimate, nudges are now every 15m -> limit 30m
+        self.assertEqual(self.codes(state, at(65)), [])
+        self.assertEqual(self.codes(state, at(85)), ["zombie"])
+
+    def test_short_tasks_use_the_flat_grace(self):
+        state, _ = self.active_state(20)
+        self.assertEqual(self.codes(state, at(59)), [])
+        self.assertEqual(self.codes(state, at(61)), ["zombie"])
+
+    def test_forgotten_break_is_a_zombie_after_the_break_grace(self):
+        state, _ = self.active_state(90)
+        tasks.start_break(state, at(10))
+        self.assertEqual(self.codes(state, at(99)), [])
+        self.assertEqual(self.codes(state, at(101)), ["zombie"])
+
+    def test_multiple_active_is_an_error_keeping_the_newest(self):
+        state, a = self.active_state()
+        b = tasks.add_task(state, "other", 30, "", T0)
+        b["status"] = "active"
+        b["sessions"].append(dict(a["sessions"][0], id="s1", start=at(30).isoformat()))
+        found = doctor.check(state, at(31))
+        self.assertEqual(found[0]["code"], "multiple_active")
+        self.assertEqual(found[0]["severity"], doctor.ERROR)
+        self.assertEqual(found[0]["fixes"], ["tempo stop --task %s --at inferred" % a["id"]])
+
+    def test_status_mismatch(self):
+        state, task = self.active_state()
+        task["status"] = "todo"  # open session, not active
+        self.assertIn("status_mismatch", self.codes(state, at(1)))
+        task["status"] = "active"
+        task["sessions"][0]["end"] = at(5).isoformat()  # active, no open session
+        self.assertIn("status_mismatch", self.codes(state, at(6)))
+
+    def test_bad_times(self):
+        state, task = self.active_state()
+        s = task["sessions"][0]
+        s["end"] = at(-5).isoformat()
+        s["endState"] = "confirmed"
+        task["status"] = "todo"
+        self.assertEqual(self.codes(state, at(1)), ["bad_times"])
+        s["end"] = at(10).isoformat()
+        s["breaks"] = [{"start": at(20).isoformat(), "end": at(25).isoformat()}]
+        self.assertEqual(self.codes(state, at(30)), ["bad_times"])
+        s["breaks"] = [{"start": "garbage", "end": None}]
+        self.assertEqual(self.codes(state, at(30)), ["bad_times"])
+
+    def test_set_aside_files_are_listed(self):
+        found = doctor.check(store.new_state(), at(0), ["tasks.json.corrupt-20261007T090000"])
+        self.assertEqual([f["code"] for f in found], ["set_aside_file"])
+
+    def test_errors_sort_first(self):
+        state, a = self.active_state()
+        b = tasks.add_task(state, "other", 30, "", T0)
+        b["status"] = "active"
+        b["sessions"].append(dict(a["sessions"][0], id="s1"))
+        found = doctor.check(state, at(500), ["tasks.json.corrupt-x"])
+        self.assertEqual(found[0]["severity"], doctor.ERROR)
+        self.assertEqual(found[-1]["severity"], doctor.WARN)
+
+
 class TestLock(_HomeCase):
     def _hold(self, pid_text):
         """Take the lock on a separate file description, as another process would."""
@@ -325,6 +493,63 @@ class TestCli(_HomeCase):
 
     def first_id(self):
         return store.read()["tasks"][0]["id"]
+
+    def run_status(self, *argv):
+        """Run a command that may exit; return (exit code, stdout)."""
+        out = io.StringIO()
+        code = 0
+        with contextlib.redirect_stdout(out):
+            try:
+                tempo.main(list(argv))
+            except SystemExit as e:
+                code = e.code
+        return code, out.getvalue()
+
+    def test_doctor_exit_codes(self):
+        self.assertEqual(self.run_status("doctor"), (0, "ok\n"))
+        self.run_cli("add", "one", "-e", "90")
+        task_id = self.first_id()
+        self.run_cli("start", task_id)
+        with store.transaction() as state:  # last confirmed two hours ago
+            old = (tasks.now_local() - timedelta(hours=2)).isoformat()
+            state["tasks"][0]["sessions"][0]["lastConfirmedAt"] = old
+        code, out = self.run_status("doctor")
+        self.assertEqual(code, 1)
+        self.assertIn("zombie", out)
+        self.assertIn("fix: tempo stop --task %s --at inferred" % task_id, out)
+        self.run_cli("confirm")
+        self.assertEqual(self.run_status("doctor")[0], 0)
+        with store.transaction() as state:
+            state["tasks"][0]["status"] = "todo"
+        self.assertEqual(self.run_status("doctor")[0], 2)
+
+    def test_the_printed_fix_actually_works(self):
+        self.run_cli("add", "one", "-e", "90")
+        task_id = self.first_id()
+        self.run_cli("start", task_id)
+        with store.transaction() as state:
+            session = state["tasks"][0]["sessions"][0]
+            session["start"] = (tasks.now_local() - timedelta(hours=3)).isoformat()
+            session["lastConfirmedAt"] = (tasks.now_local() - timedelta(hours=2)).isoformat()
+        self.run_cli("stop", "--task", task_id, "--at", "inferred")
+        task = store.read()["tasks"][0]
+        self.assertEqual(task["sessions"][0]["endState"], "inferred")
+        self.assertEqual(self.run_status("doctor")[0], 0)
+
+    def test_doctor_mentions_set_aside_files(self):
+        os.makedirs(self.home)
+        with open(self.path("tasks.json"), "w") as f:
+            f.write("not json")
+        with contextlib.redirect_stderr(io.StringIO()):
+            code, out = self.run_status("doctor")
+        self.assertEqual(code, 1)
+        self.assertIn("set_aside_file", out)
+
+    def test_stop_for_a_repaired_task_says_so(self):
+        self.run_cli("add", "one", "-e", "10")
+        with store.transaction() as state:
+            state["tasks"][0]["status"] = "active"
+        self.assertIn("reset", self.run_cli("stop", "--task", self.first_id()))
 
     def test_happy_path(self):
         self.assertIn("est 1h30m", self.run_cli("add", "write", "doc", "-e", "1h30m"))

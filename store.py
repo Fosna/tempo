@@ -142,6 +142,14 @@ def _write(state):
         raise
 
 
+def aside_files():
+    """Names of tasks.json files that were set aside as unreadable."""
+    try:
+        return sorted(n for n in os.listdir(_home()) if n.startswith("tasks.json.corrupt-"))
+    except FileNotFoundError:
+        return []
+
+
 def read():
     """Snapshot for read-only commands. Never writes."""
     with _locked():

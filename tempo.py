@@ -13,6 +13,7 @@
 import argparse
 import sys
 
+import doctor
 import store
 import tasks
 from timespec import BadDuration, format_minutes, parse_minutes
@@ -54,8 +55,11 @@ def cmd_start(args):
 def cmd_stop(args):
     now = tasks.now_local()
     with store.transaction() as state:
-        task = tasks.stop_active(state, now, _when(args.at, now))
-        session = task["sessions"][-1]
+        task = tasks.stop_active(state, now, _when(args.at, now), args.task)
+        session = task["sessions"][-1] if task["sessions"] else None
+        if session is None or session["end"] is None:
+            print("reset %s to todo" % _label(task))
+            return
         this = tasks.session_seconds(session, now)
         total = tasks.actual_seconds(task, now)
     print(
@@ -63,6 +67,25 @@ def cmd_stop(args):
         % (_label(task), session["endState"], _mins(this), _mins(total),
            format_minutes(task["estimateMin"]))
     )
+
+
+def cmd_confirm(args):
+    now = tasks.now_local()
+    with store.transaction() as state:
+        task = tasks.confirm(state, now)
+    print("confirmed %s at %s" % (_label(task), now.strftime("%H:%M")))
+
+
+def cmd_doctor(args):
+    findings = doctor.check(store.read(), tasks.now_local(), store.aside_files())
+    if not findings:
+        print("ok")
+        return
+    for f in findings:
+        print("%-5s  %s  %s" % (f["severity"], f["code"], f["message"]))
+        for fix in f["fixes"]:
+            print("       fix: %s" % fix)
+    sys.exit(2 if any(f["severity"] == doctor.ERROR for f in findings) else 1)
 
 
 def cmd_break(args):
@@ -127,12 +150,19 @@ def build_parser():
 
     s = sub.add_parser("start", help="start a session; auto-stops the active task")
     s.add_argument("id")
-    s.add_argument("--prev-end", help="when the previous task really ended: 14:30, ISO, or 'unknown'")
+    s.add_argument("--prev-end", help="when the previous task really ended: 14:30, ISO, 'inferred' or 'unknown'")
     s.set_defaults(func=cmd_start)
 
     s = sub.add_parser("stop", help="stop the active session; the task returns to todo")
-    s.add_argument("--at", help="when it really ended: 14:30, ISO, or 'unknown'")
+    s.add_argument("--at", help="when it really ended: 14:30, ISO, 'inferred' or 'unknown'")
+    s.add_argument("--task", help="stop this task's session instead of the active one")
     s.set_defaults(func=cmd_stop)
+
+    s = sub.add_parser("confirm", help="say you are still on the active task")
+    s.set_defaults(func=cmd_confirm)
+
+    s = sub.add_parser("doctor", help="check the data; exit 0 ok, 1 warnings, 2 errors")
+    s.set_defaults(func=cmd_doctor)
 
     s = sub.add_parser("break", help="pause the clock")
     s.set_defaults(func=cmd_break)
