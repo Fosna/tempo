@@ -81,6 +81,7 @@ Modeled on nudge's `store.py`:
 - Create a task with name, estimate, optional notes.
 - Statuses: `todo`, `active`, `done`.
 - Complete a task with an optional overrun reason (asked when actual exceeds the estimate).
+- Drop a task (`todo` or `done`) added by mistake: it is deleted outright, sessions and friction included, so its time counts nowhere. An `active` task must be stopped first.
 
 ### F2. Sessions
 - Start and stop a session; the CLI stamps the current time.

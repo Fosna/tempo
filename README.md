@@ -98,6 +98,7 @@ You can also run the commands yourself:
 | `tempo friction "text" [--task ID]` | log a friction point |
 | `tempo stop [--at 14:30\|inferred\|unknown]` | stop without finishing |
 | `tempo done [ID] [--reason "..."]` | finish; add why it ran over |
+| `tempo drop ID` | delete a task added by mistake; its time stops counting |
 | `tempo list [--all]` | show tasks |
 | `tempo doctor` | check the data; prints the exact fix for each problem |
 | `tempo reconcile` | list unconfirmed sessions; resolve with `--accept`, `--end` or `--discard` |

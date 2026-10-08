@@ -7,6 +7,7 @@
     tempo friction "waited on review"
     tempo stop
     tempo done --reason "scope grew"
+    tempo drop <id>
     tempo list
 """
 
@@ -213,6 +214,20 @@ def cmd_done(args):
     _sync_nudges(cancels)
 
 
+def cmd_drop(args):
+    with store.transaction() as state:
+        task = tasks.drop_task(state, args.id)
+    print("dropped %s" % _label(task))
+    # Normally none are left, but one stop failed to cancel would fire "Still on X?"
+    # for a task doctor can no longer see.
+    stale = [i for s in task["sessions"] for i in s["nudgeIds"]]
+    try:
+        for job_id in stale:
+            nudges.cancel(job_id)
+    except nudges.NudgeError as e:
+        print("tempo: nudge: %s" % e, file=sys.stderr)
+
+
 def _report_day(text, now):
     if text in (None, "today"):
         return now.date()
@@ -330,6 +345,10 @@ def build_parser():
     s.add_argument("id", nargs="?")
     s.add_argument("--reason", help="why it ran over the estimate")
     s.set_defaults(func=cmd_done)
+
+    s = sub.add_parser("drop", help="delete a task that is not active; its time stops counting")
+    s.add_argument("id")
+    s.set_defaults(func=cmd_drop)
 
     s = sub.add_parser("reconcile", help="list unknown/inferred sessions, or resolve one")
     s.add_argument("task", nargs="?")

@@ -41,6 +41,7 @@ too is tempo not installed; say so, and do not guess another path.
 | starts or switches to a task | `tempo start ID` (see switching) |
 | stops working on it (not finished) | `tempo stop [--at WHEN]` |
 | finished | `tempo done` |
+| added by mistake, duplicate, or abandoned | `tempo drop ID` (see Dropping) |
 | taking a break / back from it | `tempo break` / `tempo resume` |
 | "still on it", "yes" to a nudge | `tempo confirm` |
 | something slowed or annoyed them | `tempo friction "short note"` |
@@ -72,6 +73,10 @@ line and run `tempo done ID --reason "..."`; the user may skip it. If the task h
 friction logged, ask once whether anything is worth noting, and accept "no". Friction
 can be added at any time, even after a task is done, with `tempo friction --task ID
 "..."`.
+
+**Dropping.** `drop` deletes the task with all its time and friction; the only undo is
+`tasks.json.bak`, and only until the next write. Name the task and ask before running
+it. If it is active, ask whether to `tempo stop` first.
 
 ## Reconciling
 

@@ -258,6 +258,16 @@ def complete_task(state, task_id, now, reason=None):
     return task
 
 
+def drop_task(state, task_id):
+    """Delete a task outright, sessions and friction included: dropped time counts
+    nowhere. An active task must be stopped first."""
+    task = find_task(state, task_id)
+    if task["status"] == "active":
+        raise TempoError("task %s is active; tempo stop first" % task["id"])
+    state["tasks"].remove(task)
+    return task
+
+
 def session_seconds(session, now):
     end = _ts(session["end"]) if session["end"] else now
     secs = (end - _ts(session["start"])).total_seconds()

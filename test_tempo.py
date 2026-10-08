@@ -209,6 +209,24 @@ class TestFrictionAndDone(unittest.TestCase):
         self.assertEqual(task["overrunReason"], "scope grew")
         self.assertEqual(task["doneAt"], at(0).isoformat())  # unchanged
 
+    def test_drop_deletes_todo_and_done_tasks(self):
+        state, task = _state_with_task()
+        tasks.start_task(state, task["id"], at(0))
+        tasks.complete_task(state, None, at(30))
+        tasks.add_friction(state, "noise", at(31), task["id"])
+        tasks.drop_task(state, task["id"][:3])
+        self.assertEqual(state["tasks"], [])
+        state, task = _state_with_task()
+        tasks.drop_task(state, task["id"])
+        self.assertEqual(state["tasks"], [])
+
+    def test_drop_refuses_the_active_task(self):
+        state, task = _state_with_task()
+        tasks.start_task(state, task["id"], at(0))
+        with self.assertRaises(tasks.TempoError):
+            tasks.drop_task(state, task["id"])
+        self.assertEqual(state["tasks"], [task])
+
     def test_done_task_cannot_restart(self):
         state, task = _state_with_task()
         tasks.complete_task(state, task["id"], at(0))
@@ -793,6 +811,18 @@ class TestCli(_HomeCase):
         self.run_cli("add", "one", "-e", "90")
         self.run_cli("start", self.first_id())
         self.run_cli("done")
+        self.assertEqual(self.nudge.jobs, {})
+
+    def test_drop_removes_the_task_and_cancels_leftover_nudges(self):
+        self.run_cli("add", "one", "-e", "90")
+        task_id = self.first_id()
+        self.run_cli("start", task_id)
+        self.run_cli("stop")
+        leftover = nudges.schedule(60, "stale")
+        with store.transaction() as state:  # as if stop had failed to cancel it
+            state["tasks"][0]["sessions"][-1]["nudgeIds"] = [leftover]
+        self.assertIn("dropped", self.run_cli("drop", task_id))
+        self.assertEqual(store.read()["tasks"], [])
         self.assertEqual(self.nudge.jobs, {})
 
     def test_nudge_is_never_called_while_the_lock_is_held(self):
