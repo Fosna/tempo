@@ -45,3 +45,5 @@ Keep files short. Write in plain prose, no mockups or implementation plans.
 - `note-task-outputs.md`: add notes to a task at any time, including after it is done.
 - `daily-report-markdown.md`: write a markdown summary beside each daily JSON report.
 - `backup-reports.md`: back up `~/.tempo/reports/`.
+- `session-start-reminder.md`: a SessionStart hook that shows open and unreconciled work.
+- `status-line-timer.md`: active task and timer in the Claude Code status line.

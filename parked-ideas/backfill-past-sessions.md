@@ -30,6 +30,15 @@ already happened, so the hack is never needed again.
   run `tempo add` + `tempo start` first, before any other skill or analysis. Placeholder name,
   default estimate 30m unless given. Tracking never waits on clarifying or naming.
 
+Option (added 2026-10-09): Claude Code transcripts as evidence for times. Every chat is saved
+in `~/.claude/projects/*/*.jsonl` with a timestamp per message. Claude can read them to propose
+a backfill start or a reconcile stop time ("your last message there was at 16:42?"), and the
+user confirms before `tempo log` or `stop --at` runs. Evidence only, never a writer.
+
+- Fits work done in chat. Work in other tools leaves no trace, so transcripts only bound a
+  session, they do not measure it.
+- One chat can touch several tasks, and one task can span several chats. Matching is a guess.
+
 ## Decisions already made (2026-10-08)
 
 - Backfilled sessions are not flagged in reports. They look like any other confirmed session.
