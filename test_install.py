@@ -183,15 +183,42 @@ class TestStatus(InstallCase):
         self.assertIn("nudge is unhealthy", out)
 
 
+class TestPathHint(InstallCase):
+    """Off-PATH shims look like 'never installed'; say exactly how to fix it."""
+
+    def hint(self, shell, path="/usr/bin:/bin"):
+        return install.path_hint({"PATH": path, "SHELL": shell})
+
+    def test_quiet_when_on_path(self):
+        self.assertIsNone(self.hint("/bin/zsh", "/usr/bin:" + self.bin))
+
+    def test_zsh_uses_zshenv_not_zshrc(self):
+        # Claude Code's shell is non-interactive and never reads .zshrc
+        self.assertIn(">> ~/.zshenv", self.hint("/bin/zsh"))
+
+    def test_bash_uses_bash_profile(self):
+        self.assertIn(">> ~/.bash_profile", self.hint("/bin/bash"))
+
+    def test_unknown_shell_falls_back_to_the_shim_path(self):
+        self.assertIn(self.shim, self.hint("/usr/bin/fish"))
+
+    def test_status_passes_it_on(self):
+        self.run_cmd(install.cmd_install)
+        with mock.patch.dict(os.environ, {"PATH": "/usr/bin", "SHELL": "/bin/zsh"}):
+            code, out = self.run_cmd(install.cmd_status)
+        self.assertEqual(code, 0)
+        self.assertIn(">> ~/.zshenv", out)
+
+
 class TestNudgeProblem(unittest.TestCase):
     def test_missing(self):
-        with mock.patch("install.shutil.which", return_value=None):
-            self.assertIn("not on the PATH", install._nudge_problem())
+        with mock.patch("install.nudges.find", return_value=None):
+            self.assertIn("not installed", install._nudge_problem())
 
     def test_unhealthy_and_healthy(self):
         bad = subprocess.CompletedProcess([], 1, stdout="daemon  not loaded\n", stderr="")
         good = subprocess.CompletedProcess([], 0, stdout="daemon  loaded\n", stderr="")
-        with mock.patch("install.shutil.which", return_value="/x/nudge"):
+        with mock.patch("install.nudges.find", return_value="/x/nudge"):
             with mock.patch("install.subprocess.run", return_value=bad):
                 self.assertIn("unhealthy", install._nudge_problem())
             with mock.patch("install.subprocess.run", return_value=good):

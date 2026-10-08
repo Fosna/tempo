@@ -50,8 +50,28 @@ python3 install.py install
 ```
 
 This writes a `tempo` command to `~/.local/bin` and links the skill into
-`~/.claude/skills/tempo`. Make sure `~/.local/bin` is on your `PATH`, then start a new
-Claude Code session so the skill loads.
+`~/.claude/skills/tempo`.
+
+`~/.local/bin` needs to be on your `PATH` for the bare `tempo` command. If it isn't,
+`install` and `status` print the line to add for your shell:
+
+| shell | file |
+|---|---|
+| zsh | `~/.zshenv` |
+| bash | `~/.bash_profile` |
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshenv
+```
+
+Use that file, not `~/.zshrc`: Claude Code runs commands in a non-interactive shell,
+which never reads `.zshrc`. Then restart your terminal and any running Claude Code
+session, since they keep the PATH they started with. A terminal inside VS Code inherits
+VS Code's PATH, so quit and reopen VS Code itself. A new Claude Code session is also
+what loads the skill.
+
+The same directory is where [nudge](#nudges-optional) installs. tempo looks for it on
+the PATH first and falls back to `~/.local/bin/nudge`.
 
 ```bash
 python3 install.py status      # is it healthy, and if not, how to repair it

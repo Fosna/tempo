@@ -522,6 +522,21 @@ class TestNudgeMarks(unittest.TestCase):
 
 
 class TestNudgeAdapter(unittest.TestCase):
+    def test_find_prefers_the_path(self):
+        with mock.patch("nudges.shutil.which", return_value="/opt/nudge"):
+            self.assertEqual(nudges.find(), "/opt/nudge")
+
+    def test_find_falls_back_to_the_shim_off_the_path(self):
+        with tempfile.TemporaryDirectory() as d:
+            shim = os.path.join(d, "nudge")
+            with mock.patch("nudges.shutil.which", return_value=None), \
+                    mock.patch.object(nudges, "FALLBACK", shim):
+                self.assertIsNone(nudges.find())
+                with open(shim, "w") as f:
+                    f.write("#!/bin/sh\n")
+                os.chmod(shim, 0o755)
+                self.assertEqual(nudges.find(), shim)
+
     def test_schedule_returns_the_job_id(self):
         with mock.patch.object(nudges, "_run", return_value=(0, "3f1a9c  in 15m  'x'\n", "")) as run:
             self.assertEqual(nudges.schedule(900, "x"), "3f1a9c")
@@ -548,7 +563,8 @@ class TestNudgeAdapter(unittest.TestCase):
 
     def test_missing_binary(self):
         with mock.patch.dict(os.environ, {}, clear=False), \
-                mock.patch("nudges.shutil.which", return_value=None):
+                mock.patch("nudges.shutil.which", return_value=None), \
+                mock.patch.object(nudges, "FALLBACK", "/nonexistent/nudge"):
             os.environ.pop("TEMPO_NUDGE", None)
             with self.assertRaises(nudges.NudgeError):
                 nudges._run(["list"])

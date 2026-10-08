@@ -6,7 +6,8 @@ slow or hung nudge would then hold the lock too. And a failure here must never s
 tracking, so every problem surfaces as NudgeError for the caller to turn into a
 warning.
 
-`TEMPO_NUDGE` overrides the command (default: `nudge` on the PATH).
+`TEMPO_NUDGE` overrides the command (default: `nudge` on the PATH, else the shim
+nudge's installer writes to ~/.local/bin, which is often not on the PATH).
 """
 
 import os
@@ -15,15 +16,28 @@ import shutil
 import subprocess
 
 
+# Where nudge's install.py writes its shim.
+FALLBACK = os.path.expanduser("~/.local/bin/nudge")
+
+
 class NudgeError(Exception):
     pass
 
 
+def find():
+    """Path to the nudge command, or None if it is not installed."""
+    found = shutil.which("nudge")
+    if found:
+        return found
+    return FALLBACK if os.access(FALLBACK, os.X_OK) else None
+
+
 def _command():
     configured = os.environ.get("TEMPO_NUDGE")
-    cmd = shlex.split(configured) if configured else [shutil.which("nudge") or ""]
+    cmd = shlex.split(configured) if configured else [find() or ""]
     if not cmd[0]:
-        raise NudgeError("nudge not found on the PATH (install it, or set TEMPO_NUDGE)")
+        raise NudgeError("nudge not found on the PATH or in ~/.local/bin "
+                         "(install it, or set TEMPO_NUDGE)")
     return cmd
 
 

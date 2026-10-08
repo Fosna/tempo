@@ -27,8 +27,11 @@ last confirmed on X at 14:10. Still on it, stopped then, stopped at another time
 don't remember?" Then run the matching fix: `tempo confirm`, `tempo stop --task ID --at
 inferred`, `--at HH:MM`, or `--at unknown`.
 
-**`tempo` not found:** tempo is not installed on this machine. Say so; do not guess a
-path.
+**`tempo` not found:** try `~/.local/bin/tempo doctor` before concluding anything --
+that is where `install.py` puts the shim, and that directory is often not on the PATH.
+If it works, tempo is installed: use the full path for the rest of the session, and
+pass on the PATH fix that `python3 install.py status` prints. Only if that is missing
+too is tempo not installed; say so, and do not guess another path.
 
 ## What to run
 

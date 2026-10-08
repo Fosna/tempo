@@ -19,9 +19,10 @@ never touched.
 import argparse
 import os
 import shlex
-import shutil
 import subprocess
 import sys
+
+import nudges
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BIN = os.path.expanduser("~/.local/bin")
@@ -118,9 +119,10 @@ def _is_inside(path, root):
 
 def _nudge_problem():
     """Why nudges would not fire, or None. Tempo works without nudge, only blind."""
-    if not shutil.which("nudge"):
-        return "nudge is not on the PATH (tempo works, but sessions get no reminders)"
-    r = subprocess.run(["nudge", "status"], capture_output=True, text=True)
+    nudge = nudges.find()
+    if not nudge:
+        return "nudge is not installed (tempo works, but sessions get no reminders)"
+    r = subprocess.run([nudge, "status"], capture_output=True, text=True)
     if r.returncode != 0:
         return "nudge is unhealthy: %s" % ((r.stdout + r.stderr).strip() or r.returncode)
     return None
@@ -133,13 +135,31 @@ def cmd_install(args):
     for name in SKILLS:
         print("  skill  %s (%s)" % (os.path.join(SKILLS_DIR, name), link_skill(name)))
     print("  state  %s (created on first use)" % os.path.expanduser("~/.tempo"))
-    if BIN not in os.environ.get("PATH", "").split(os.pathsep):
-        print("\nnote: %s is not on your PATH, so `tempo` will not resolve.\n"
-              "      add it to your shell profile, or call %s directly." % (BIN, path))
+    hint = path_hint()
+    if hint:
+        print("\nnote: %s is not on your PATH, so `tempo` will not resolve.\n      %s"
+              % (BIN, hint))
     problem = _nudge_problem()
     if problem:
         print("\nnote: %s" % problem)
     return 0
+
+
+# The file each shell reads even when non-interactive, which is how Claude Code
+# runs commands -- `.zshrc` would fix the terminal but not the skill.
+PROFILES = {"zsh": "~/.zshenv", "bash": "~/.bash_profile"}
+
+
+def path_hint(env=None):
+    """How to put BIN on the PATH for the user's shell, or None if it already is."""
+    env = os.environ if env is None else env
+    if BIN in env.get("PATH", "").split(os.pathsep):
+        return None
+    profile = PROFILES.get(os.path.basename(env.get("SHELL", "")))
+    if not profile:
+        return "add it to your shell profile, or call %s directly." % shim_path()
+    return ("run:  echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> %s\n"
+            "      then restart your terminal and Claude Code." % profile)
 
 
 def cmd_uninstall(args):
@@ -198,9 +218,14 @@ def cmd_status(args):
     found = problems()
     if not found:
         print("tempo  installed  %s" % HERE)
-        return 0
     for item in found:
         print("problem  %s" % item)
+    hint = path_hint()
+    if hint:
+        print("\nnote: %s is not on your PATH, so bare `tempo` will not resolve.\n      %s"
+              % (BIN, hint))
+    if not found:
+        return 0
     print("\nrepair: %s %s install" % (_quote(sys.executable), _quote(os.path.join(HERE, "install.py"))))
     return 1
 
